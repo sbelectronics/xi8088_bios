@@ -41,6 +41,7 @@ int_15_flags	equ	int_15_cs+2
 ; Input:
 ;	AH = 4Fh - OS hook keyboard intercept
 ;		- Does nothing
+;	AH = 84h - read joystick
 ;	AH = 0C2h - PS/2 mouse services
 ;		- Implemented in ps2aux.inc
 ;-------------------------------------------------------------------------
@@ -49,6 +50,8 @@ int_15:
 	sti
 	cmp	ah,4Fh
 	je	int_15_exit		; continue with int 09h ISR
+	cmp	ah,084h
+	je	int_15_fn84
 	cmp	ah,0C0h
 	je	int_15_fnC0
 	cmp	ax,9001h
@@ -102,3 +105,128 @@ int_15_fnC0:
 	mov	es,bx
 	mov	bx,config_table
 	jmp	int_15_ok
+
+;=========================================================================
+; int_15_fn84 - Get joystick
+; Input:
+;	AH = 084h - get configuration
+;       DX = 0 = read switches, 1 = read pots
+; Output:
+;	INPUT							:
+;	(DX)=0 READ THE CURRENT SWITCHES			:
+;	       RETURNS (AL)= SWITCH SETTINGS IN BITS 7-4	:
+;								:
+;	(DX)=1	READ THE RESISTIVE INPUTS			:
+;		RETURNS (AX)=A(x) VALUE 			:
+;			(BX)=A(y) VALUE 			:
+;			(CX)=B(x) VALUE 			:
+;			(DX)=B(y) VALUE 			:
+;
+; Note: adapted from IBM PC BIOS SOURCE CODE reconstruction
+;       https://sites.google.com/site/pcdosretro/ibmpcbios
+;-------------------------------------------------------------------------
+
+int_15_fn84:
+	MOV	AX,DX			; GET SUB FUNCTION CODE
+	MOV	DX,201H 		; ADDRESS OF PORT
+	OR	AL,AL
+	JZ	JOY_2			; READ SWITCHES
+	DEC	AL
+	JZ	JOY_3			; READ RESISTIVE INPUTS
+	JMP	int_15_err		; GO TO ERROR RETURN
+JOY_1:
+	STI
+        JMP     int_15_ok               ; GO TO COMMON RETURN
+
+JOY_2:
+	IN	AL,DX
+	AND	AL,0F0H 		; STRIP UNWANTED BITS OFF
+	JMP	JOY_1			; FINISHED
+
+JOY_3:
+	MOV	BL,1
+	CALL	TEST_CORD
+	PUSH	CX			; SAVE A(X) VALUE
+	MOV	BL,2
+	CALL	TEST_CORD
+	PUSH	CX			; SAVE A(Y) VALUE
+	MOV	BL,4
+	CALL	TEST_CORD
+	PUSH	CX			; SAVE B(X) VALUE
+	MOV	BL,8
+	CALL	TEST_CORD
+	MOV	DX,CX			; SAVE B(Y) VALUE
+	POP	CX			; GET B(X) VALUE
+	POP	BX			; GET A(Y) VALUE
+	POP	AX			; GET A(X) VALUE
+	JMP	JOY_1			; FINISHED - RETURN
+
+TEST_CORD:
+	PUSH	DX			; SAVE
+	CLI				; BLOCK INTERRUPTS WHILE READING
+	MOV	AL,0			; SET UP TO LATCH TIMER 0
+	OUT	pit_ch0_reg+3,AL
+	JMP	$+2
+	IN	AL,pit_ch0_reg		; READ LOW BYTE OF TIMER 0
+	JMP	$+2
+	MOV	AH,AL
+	IN	AL,pit_ch0_reg		; READ HIGH BYTE OF TIMER 0
+	XCHG	AH,AL			; REARRANGE TO HIGH,LOW
+	PUSH	AX			; SAVE
+	MOV	CX,4FFH 		; SET COUNT
+	OUT	DX,AL			; FIRE TIMER
+	JMP	$+2
+TEST_CORD_1:
+	IN	AL,DX			; READ VALUES
+	TEST	AL,BL			; HAS PULSE ENDED?
+	LOOPNZ	TEST_CORD_1
+	CMP	CX,0
+	POP	CX			; ORIGINAL COUNT
+	JNZ	SHORT TEST_CORD_2
+	SUB	CX,CX			; SET 0 COUNT FOR RETURN
+	JMP	SHORT TEST_CORD_3	; EXIT WITH COUNT = 0
+TEST_CORD_2:
+	MOV	AL,0			; SET UP TO LATCH TIMER 0
+	OUT	pit_ch0_reg+3,AL
+	JMP	$+2
+	IN	AL,pit_ch0_reg		; READ LOW BYTE OF TIMER 0
+	MOV	AH,AL
+	JMP	$+2
+	IN	AL,pit_ch0_reg		; READ HIGH BYTE OF TIMER 0
+	XCHG	AH,AL			; REARRANGE TO HIGH,LOW
+
+	CMP	CX,AX			; CHECK FOR COUNTER WRAP
+	JAE	TEST_CORD_4		; GO IF NO
+	PUSH	DX
+	MOV	DX,-1
+
+	SUB	DX,AX			; ADJUST FOR WRAP
+	ADD	CX,DX
+	POP	DX
+	JMP	SHORT TEST_CORD_5
+
+TEST_CORD_4:
+	SUB	CX,AX
+TEST_CORD_5:
+	AND	CX,1FF0H		; ADJUST
+	SHR	CX,1                    ; SHR CX,4 not supported by 8088
+	SHR	CX,1
+	SHR	CX,1
+	SHR	CX,1
+
+TEST_CORD_3:
+	STI				; INTERRUPTS BACK ON
+	MOV	DX,201H 		; FLUSH OTHER INPUTS
+	PUSH	CX
+	PUSH	AX
+	MOV	CX,4FFH 		; COUNT
+TEST_CORD_6:
+	IN	AL,DX
+	TEST	AL,0FH
+	LOOPNZ	TEST_CORD_6
+
+	POP	AX
+	POP	CX
+	POP	DX			; SET COUNT
+
+	RET				; RETURN
